@@ -77,7 +77,7 @@ This table summarizes the main problems I encountered and the changes I made. Ea
 | 004 | Similarity scores need a consistent vector scale. | Generate embeddings without normalization. | Normalize document and query embeddings. | Use dot product as cosine similarity. | Vector magnitude is no longer retained. | Confirm both sides use normalized embeddings. | [Details](#decision-004-normalized-embeddings) |
 | 005 | Generated vectors need to persist between runs. | Keep generated data in memory. | Store each chunk as a JSONL record. | Reuse embeddings without regenerating them every time. | Simple to inspect, but not optimized for large-scale search. | Reload records and verify their contents. | [Details](#decision-005-persisting-vectors-in-jsonl) |
 | 006 | Comparing each vector individually would add unnecessary Python-loop overhead. | Iterate through vectors to calculate scores. | Use NumPy matrix multiplication. | Calculate similarity scores in one vectorized operation. | All vectors are loaded into memory. | Inspect the highest-scoring retrieved chunks. | [Details](#decision-006-vectorized-similarity-search) |
-
+| 007 | Decoding token IDs back into text did not preserve the original source text exactly. | Decode each token window using `tokenizer.decode()`. | Use `return_offsets_mapping=True` to extract chunks directly from the original text. | Preserve original casing and formatting without decoding and recreating the text. | Token boundaries can split words, causing the extracted text to produce a different token count when re-tokenized. | Re-tokenize extracted chunks and verify they stay within 256 tokens. Testing identified a chunk that became 257 tokens. | [Details](#decision-007-offset-based-text-extraction) |
 ---
 
 ## Decision details
@@ -92,7 +92,7 @@ The embedding model has a maximum input length of 256 tokens. Splitting text by 
 
 I initially split the document using a fixed number of words per chunk.
 
-**New approach**
+**Next approach**
 
 I use the model's tokenizer to split the document into token windows. The current implementation sets the window size to `model.max_seq_length - 5` and checks the decoded chunks again before generating embeddings.
 
@@ -107,6 +107,10 @@ The implementation is now tied to the tokenizer and model being used. It also re
 **Validation**
 
 The script tokenizes each generated chunk again and raises an error if its token count exceeds the model's maximum sequence length.
+
+**New approach**
+
+I use the model's tokenizer to split documents into token windows, using `model.max_seq_length` as the maximum input size. I then use offset mapping to extract the original text for each chunk instead of decoding token IDs back into text. See Decision 007 for more details.
 
 ### Decision 002: Overlapping chunks
 
@@ -257,6 +261,42 @@ This approach is simple and effective for the current dataset, but all embedding
 **Validation**
 
 Inspect the highest-scoring chunks for a set of test questions and confirm that the retrieved text is relevant to the question.
+
+### Decision 007: Offset-based text extraction
+
+**Problem**
+
+The initial implementation decoded token IDs back into text to create chunks. However, decoding did not preserve the original source text exactly. For example, the decoded text could change the original casing and formatting.
+
+**Initial approach**
+
+Use `tokenizer.decode()` on each token window to convert the token IDs back into text.
+
+**New approach**
+
+Use `return_offsets_mapping=True` when tokenizing the original document.
+
+The offset mapping provides the character start and end positions for each token. I use these positions to extract the chunk directly from the original document using Python string slicing.
+
+**Why**
+
+This preserves the original text, including its casing and formatting, without relying on a decode-and-re-tokenize process.
+
+**Trade-offs**
+
+Token boundaries do not necessarily align with complete word boundaries. A chunk can start or end in the middle of a word.
+
+When the extracted text is tokenized again, the tokenizer may generate a different number of tokens than the original window.
+
+**Validation**
+
+I re-tokenize every extracted chunk with `add_special_tokens=True` and `truncation=False`, then verify that it does not exceed the model's 256-token limit.
+
+During testing, I found a chunk that started with `eration`. In the original token window, this was represented by one token (`16754`). After extracting and re-tokenizing the substring, it became two tokens (`3690` and `3508`), resulting in 257 tokens instead of 256.
+
+The validation correctly identifies this condition and raises an error rather than allowing an oversized chunk to be embedded.
+
+Whole-word boundary handling is a potential improvement that I will evaluate separately.
 
 ---
 
