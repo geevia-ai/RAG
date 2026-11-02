@@ -1,0 +1,46 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python testing and linting
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Environment variables and API secrets
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated RAG vectors and embeddings
+vectors/
+*.npy
+*.npz
+*.faiss
+
+# Downloaded models and local caches
+models/
+.cache/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+#source documenatation
+/docs

@@ -1,0 +1,28 @@
+text:logical host.
+
+As well as application containers, a Pod can contain
+{{< glossary_tooltip text="init containers" term_id="init-container" >}} that run
+during Pod startup. You can also inject
+{{< glossary_tooltip text="ephemeral containers" term_id="ephemeral-container" >}}
+for debugging a running Pod.
+
+<!-- body -->
+
+## What is a Pod?
+
+{{< note >}}
+You need to install a [container runtime](/docs/setup/production-environment/container-runtimes/)
+into each node in the cluster so that Pods can run there.
+{{< /note >}}
+
+The shared context of a Pod is a set of Linux namespaces, cgroups, and
+potentially other facets of isolation - the same things that isolate a {{< glossary_tooltip text="container" term_id="container" >}}. Within a Pod's context, the individual applications may have
+further sub-isolations applied.
+
+A Pod is similar to a set of containers with shared namespaces and shared filesystem volumes.
+
+Pods in a Kubernetes cluster are used in two main ways:
+
+* **Pods that run a single container**. The "one-container-per-Pod" model
+ word count:150
+tokens : ['[CLS]', 'logical', 'host', '.', 'as', 'well', 'as', 'application', 'containers', ',', 'a', 'pod', 'can', 'contain', '{', '{', '<', 'gloss', '##ary', '_', 'tool', '##tip', 'text', '=', '"', 'in', '##it', 'containers', '"', 'term', '_', 'id', '=', '"', 'in', '##it', '-', 'container', '"', '>', '}', '}', 'that', 'run', 'during', 'pod', 'startup', '.', 'you', 'can', 'also', 'in', '##ject', '{', '{', '<', 'gloss', '##ary', '_', 'tool', '##tip', 'text', '=', '"', 'ep', '##hem', '##eral', 'containers', '"', 'term', '_', 'id', '=', '"', 'ep', '##hem', '##eral', '-', 'container', '"', '>', '}', '}', 'for', 'de', '##bu', '##gging', 'a', 'running', 'pod', '.', '<', '!', '-', '-', 'body', '-', '-', '>', '#', '#', 'what', 'is', 'a', 'pod', '?', '{', '{', '<', 'note', '>', '}', '}', 'you', 'need', 'to', 'install', 'a', '[', 'container', 'run', '##time', ']', '(', '/', 'doc', '##s', '/', 'setup', '/', 'production', '-', 'environment', '/', 'container', '-', 'run', '##time', '##s', '/', ')', 'into', 'each', 'node', 'in', 'the', 'cluster', 'so', 'that', 'pods', 'can', 'run', 'there', '.', '{', '{', '<', '/', 'note', '>', '}', '}', 'the', 'shared', 'context', 'of', 'a', 'pod', 'is', 'a', 'set', 'of', 'linux', 'names', '##pace', '##s', ',', 'c', '##group', '##s', ',', 'and', 'potentially', 'other', 'face', '##ts', 'of', 'isolation', '-', 'the', 'same', 'things', 'that', 'isolate', 'a', '{', '{', '<', 'gloss', '##ary', '_', 'tool', '##tip', 'text', '=', '"', 'container', '"', 'term', '_', 'id', '=', '"', 'container', '"', '>', '}', '}', '.', 'within', 'a', 'pod', "'", 's', 'context', ',', 'the', 'individual', 'applications', 'may', 'have', 'further', 'sub', '-', 'isolation', '##s', 'applied', '.', 'a', 'pod', 'is', 'similar', 'to', 'a', 'set', 'of', 'containers', 'with', 'shared', 'names', '##pace', '##s', 'and', 'shared', 'files', '##yst', '##em', 'volumes', '.', 'pods', 'in', 'a', 'ku', '##ber', '##net', '##es', 'cluster', 'are', 'used', 'in', 'two', 'main', 'ways', ':', '*', '*', '*', 'pods', 'that', 'run', 'a', 'single', 'container', '*', '*', '.', 'the', '"', 'one', '-', 'container', '-', 'per', '-', 'pod', '"', 'model', '[SEP]']
