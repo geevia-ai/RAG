@@ -4,38 +4,49 @@ from sentence_transformers import SentenceTransformer
 import json
 from numpy.typing import NDArray
 model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-MAX_TOKENS_SIZE = model.max_seq_length - 5
+MAX_TOKENS_SIZE = model.max_seq_length
 
 OVERLAP_SIZE = 50
 KNOWLEDGE_VECTOR=[]
 DOCUMENT_FILES = "./docs/"
 VECTOR_FILE = "./vectors/vectors.jsonl"
 
-def encode_text(text:str, doc_num) -> tuple[NDArray,list[str]]:
+def encode_text(text:str, doc_id:str) -> tuple[NDArray,list[str]]:
     """
     The model all-MiniLM-L6-v2 has a limitation of MAX_TOKENS_SIZE of 256 on the input text it can encode at a time.
     To get over this limitation, the text is first tokenized into MAX_TOKENS_SIZE size chunks
-    Then the token id chunks are decoded back to text and encoded
-    This is done to ensure text is not truncated when split into MAX_TOKENS_SIZE chunks as 
-    multiple tokens can be generated for a single words and can generate tokens over the MAX_TOKENS_SIZE limit
+    Then the start and end positions are calculated for each token chunk using the offset_mapping and used to create text chunks
+    The text chunks are toneknized again to ensure the MAX_TOKENS_SIZE  is not exceeded
+    Finally the embeddings are created from the text chunks
     """
+
+    if not model.tokenizer.is_fast:
+        raise ValueError("Offset mapping requires a fast tokenizer.")
+    
     encoded = model.tokenizer(
         text ,
         truncation = True,
         add_special_tokens=True,
         max_length = MAX_TOKENS_SIZE,
         stride = OVERLAP_SIZE,
-        return_overflowing_tokens=True
+        return_overflowing_tokens=True,
+        return_offsets_mapping= True
     )
 
-    chunks_text = [
-        model.tokenizer.decode(
-        ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
-        ) 
-        for ids in encoded['input_ids']
-    ]
+
+    chunks_text = []
+    for offsets in encoded["offset_mapping"]:
+        valid_offsets =[
+            (start,end) for start,end in offsets
+            if start < end 
+        ]
+        if not valid_offsets:
+            continue
+        start_position=valid_offsets[0][0]
+        end_position = valid_offsets[-1][1]
+        chunk = text[start_position:end_position]
+        chunks_text.append(chunk)
+
 
     chunks_text_token_len = [
        len( 
@@ -47,12 +58,27 @@ def encode_text(text:str, doc_num) -> tuple[NDArray,list[str]]:
         ) for chunk in chunks_text
     ]
 
+    chunks_text_token = [
+       
+            model.tokenizer(
+            chunk ,
+            add_special_tokens=True,
+            truncation = False
+            )['input_ids']
+         for chunk in chunks_text
+    ]
+
     oversized = [
-        index for (index,count) in enumerate(chunks_text_token_len)
-        if count > model.max_seq_length
+        (index,count) for (index,count) in enumerate(chunks_text_token_len)
+        if count > MAX_TOKENS_SIZE
     ]
     if oversized:
-        raise ValueError(f"document number:{doc_num} has the following chunks over {MAX_TOKENS_SIZE} : {oversized} ")
+        for (id,_) in oversized:
+                print(f"chunk text oversize:{chunks_text[id]}")
+                print(f"chunk tokens:{chunks_text_token[id]}")
+                print(f"original tokens:{encoded["input_ids"][id]}")
+                print(f"end test")
+        raise ValueError(f"document id:{doc_id} has the following chunks over {MAX_TOKENS_SIZE} : {oversized} ")
         
     embeddings = model.encode(
         chunks_text,
@@ -86,7 +112,7 @@ def content_cleanup(text: str)-> str:
     text = re.sub(r'!?\[([^\]]+)\]\([^)]+\)', r'\1', text)
     return text
 
-def chunk_and_encode_file(doc_id: int,doc_path: str,content: str, vector_file: Path)-> None:
+def chunk_and_encode_file(doc_id: str,doc_path: str,content: str, vector_file: Path)-> None:
     """
     create documents with the cleaned document source, document id, chunk text and embeddings
     """
