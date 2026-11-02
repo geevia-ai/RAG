@@ -1,544 +1,309 @@
-# Building a RAG System from Scratch
+# Kubernetes Documentation RAG
 
-This repository documents my journey of building a Retrieval-Augmented Generation (RAG) system using Python, local embedding models, and OpenAI.
+## Overview
 
-The objective is to understand how the different components of a RAG system work, starting with a basic implementation and progressively improving it.
+I started this project to build a Retrieval-Augmented Generation (RAG) system using Kubernetes documentation as the source of knowledge.
 
-Rather than relying on frameworks that hide the underlying implementation, I'm building the individual components myself. Along the way, I'm documenting the problems I encounter, the approaches I try, the decisions I make, and the improvements.
+The goal is to take Markdown documentation, turn it into searchable vector representations, retrieve the most relevant sections for a question, and use an LLM to generate an answer grounded in those sections.
 
-The knowledge source for this project is the public Kubernetes documentation.
+The project started with a basic document ingestion and retrieval pipeline. I am improving it incrementally as I encounter limitations and make implementation decisions.
 
-## 1. Project overview
+## Current pipeline
 
-The application allows users to ask questions about a collection of documents.
+```text
+Kubernetes Markdown documentation
+              |
+              v
+       Content cleanup
+              |
+              v
+        Token chunking
+              |
+              v
+       Generate embeddings
+              |
+              v
+       Store in JSONL
+              |
+              v
+        User question
+              |
+              v
+      Generate query embedding
+              |
+              v
+       Similarity search
+              |
+              v
+       Retrieve top chunks
+              |
+              v
+        LLM generates answer
+```
 
-For example:
+## Project structure
 
-**Question:** What manages ReplicaSets in Kubernetes?
+```text
+.
+├── docs/
+│   └── Kubernetes Markdown files
+├── vectors/
+│   └── vectors.jsonl
+├── RAG_save_document_vectors.py
+└── RAG_query.py
+```
 
-The application:
+## Implementation stages
 
-1. Searches the Kubernetes documentation for relevant content.
-2. Identifies the most relevant document chunks.
-3. Sends those chunks, together with the original question, to a language model.
-4. Generates an answer grounded in the retrieved documentation.
-5. Includes references to the original document chunks.
+| Stage | What it does |
+|---|---|
+| 1. Collect documents | Reads Kubernetes Markdown files from `docs/`. |
+| 2. Clean content | Removes documentation markup that is not useful as context while preserving meaningful text. |
+| 3. Chunk documents | Splits documents into token-based chunks with overlap. |
+| 4. Generate embeddings | Uses `all-MiniLM-L6-v2` to convert each chunk into a vector. |
+| 5. Store vectors | Saves the chunk text, source metadata, and embedding in a JSONL file. |
+| 6. Retrieve context | Embeds the user's question and retrieves the top matching chunks using similarity scores. |
+| 7. Generate an answer | Sends the question and retrieved text to the LLM to generate a grounded response. |
 
-The project is being developed incrementally, from basic document ingestion to more advanced retrieval techniques.
+## Engineering decisions
 
-## 2. Project roadmap
+This table summarizes the main problems I encountered and the changes I made. Each decision links to the detailed reasoning below.
 
-The following roadmap describes the progression of the project and its current implementation.
-
-| Stage | Component | Implementation |
-|---|---|---|
-| 1 | Document ingestion | Collect and read Markdown documents |
-| 2 | Text preprocessing | Clean Kubernetes documentation |
-| 3 | Document chunking | Split documents using the model tokenizer |
-| 4 | Embeddings | Generate vectors using Sentence Transformers |
-| 5 | Vector storage | Store chunks and embeddings in JSONL |
-| 6 | Retrieval | Find the most similar chunks using cosine similarity |
-| 7 | Answer generation | Send retrieved context to an OpenAI language model |
-| 8 | Retrieval improvements | Offset mapping, improved chunk boundaries, evaluation |
-| 9 | Advanced RAG | Hybrid search, reranking, and vector databases |
-
-Stages 1–7 represent the current implementation. The remaining stages are planned improvements.
+| Decision | Problem | Initial approach | New approach | Why | Trade-offs | Validation | Details |
+|---|---|---|---|---|---|---|---|
+| 001 | Word counts do not reflect model token limits. | Split documents by word count. | Split using the model tokenizer. | Keep chunks within the model's input limit. | More control, but tokenizer-specific. | Re-tokenize chunks and reject oversized ones. | [Details](#decision-001-token-based-chunking) |
+| 002 | Chunk boundaries can separate related context. | Create independent chunks. | Add a 50-token overlap. | Preserve context between neighboring chunks. | More chunks and repeated text. | Inspect neighboring chunks for shared context. | [Details](#decision-002-overlapping-chunks) |
+| 003 | Raw Kubernetes Markdown contains markup and formatting noise. | Use the source text as-is. | Clean comments, shortcodes, and links while preserving useful text. | Give the embedding model cleaner content. | Cleanup rules are specific to the source format. | Inspect cleaned output against the original. | [Details](#decision-003-cleaning-the-source-content) |
+| 004 | Similarity scores need a consistent vector scale. | Generate embeddings without normalization. | Normalize document and query embeddings. | Use dot product as cosine similarity. | Vector magnitude is no longer retained. | Confirm both sides use normalized embeddings. | [Details](#decision-004-normalized-embeddings) |
+| 005 | Generated vectors need to persist between runs. | Keep generated data in memory. | Store each chunk as a JSONL record. | Reuse embeddings without regenerating them every time. | Simple to inspect, but not optimized for large-scale search. | Reload records and verify their contents. | [Details](#decision-005-persisting-vectors-in-jsonl) |
+| 006 | Comparing each vector individually would add unnecessary Python-loop overhead. | Iterate through vectors to calculate scores. | Use NumPy matrix multiplication. | Calculate similarity scores in one vectorized operation. | All vectors are loaded into memory. | Inspect the highest-scoring retrieved chunks. | [Details](#decision-006-vectorized-similarity-search) |
 
 ---
 
-## 3. Current architecture
+## Decision details
 
-The application has two main processes: document ingestion and question processing.
+### Decision 001: Token-based chunking
 
-### Document ingestion
+**Problem**
 
-```text
-Kubernetes Markdown documents
-            |
-            v
-       Text cleanup
-            |
-            v
-        Tokenizer
-            |
-            v
-      Document chunks
-            |
-            v
-     Local embedding model
-      all-MiniLM-L6-v2
-            |
-            v
-       JSONL storage
-```
+The embedding model has a maximum input length of 256 tokens. Splitting text by word count does not guarantee that a chunk stays within this limit because a single word can be represented by multiple tokens.
 
-### Question processing
+**Initial approach**
 
-```text
-       User question
-            |
-            v
-      Query embedding
-            |
-            v
-     Similarity search
-            |
-            v
-    Top 3 matching chunks
-            |
-            v
-       OpenAI API
-            |
-            v
-    Answer with citations
-```
+I initially split the document using a fixed number of words per chunk.
 
-## 4. Implementation details
+**New approach**
 
-### Stage 1 — Document ingestion
+I use the model's tokenizer to split the document into token windows. The current implementation sets the window size to `model.max_seq_length - 5` and checks the decoded chunks again before generating embeddings.
 
-**Objective:** Collect documents that will form the knowledge base.
+**Why**
 
-I'm using the public Kubernetes documentation:
+The tokenizer determines how the model actually sees the text. Using it for chunking makes the chunk size more reliable than counting words.
 
-https://github.com/kubernetes/website/tree/main/content/en/docs
+**Trade-offs**
 
-I've started with selected Markdown documents rather than ingesting the entire repository.
+The implementation is now tied to the tokenizer and model being used. It also requires converting token windows back into text before generating embeddings.
 
-The ingestion script recursively searches the local `docs/` directory for Markdown files.
+**Validation**
 
-Each document receives an identifier based on its relative file path. This makes it easier to trace retrieved chunks back to their original documents.
+The script tokenizes each generated chunk again and raises an error if its token count exceeds the model's maximum sequence length.
 
-**Learning notes:**
-- Reading files using Python's `pathlib`.
-- Searching nested directories using `rglob()`.
-- Working with Markdown files.
-- Creating document identifiers.
+### Decision 002: Overlapping chunks
 
-**Status:** Implemented.
+**Problem**
 
-### Stage 2 — Document cleaning
+When documents are split into independent chunks, related information can end up on opposite sides of a chunk boundary.
 
-**Objective:** Remove website-specific formatting while retaining the meaningful content.
+**Initial approach**
 
-Kubernetes documentation uses Hugo shortcodes, Markdown links, and HTML comments. These can introduce unnecessary text into the embedding process.
+Chunks were created without shared content.
 
-The `content_cleanup()` function uses Python regular expressions to clean the documentation.
+**New approach**
 
-Current cleanup rules:
+I added a 50-token overlap using the tokenizer's `stride` parameter.
 
-- Preserve the `text` attribute from `glossary_tooltip` shortcodes.
-- Remove HTML comments (`<!-- ... -->`).
-- Remove Hugo shortcode wrapper tags (`{{< ... >}}`).
-- Preserve Markdown link text while removing the associated URL.
+**Why**
 
-**Learning notes:**
-- Python regular expressions.
-- `re.sub()` and capture groups.
-- Preserving useful content while removing formatting instructions.
-- Why document preprocessing matters for retrieval.
+The overlap gives neighboring chunks some shared context. This can help retrieval when an answer depends on information near a chunk boundary.
 
-**Status:** Implemented. Additional cleanup rules may be introduced as new Markdown patterns are encountered.
+**Trade-offs**
 
-### Stage 3 — Document chunking
+Overlap increases the number of chunks, stored embeddings, and repeated content.
 
-**Objective:** Divide long documents into smaller sections that the embedding model can process.
+**Validation**
 
-The embedding model used in this project, `all-MiniLM-L6-v2`, has a maximum input sequence length of 256 tokens.
+Inspect neighboring chunks and confirm that they share the expected context without losing document content.
 
-Passing an entire document that exceeds this limit to `model.encode()` results in truncation. Text beyond the model's input limit is not represented in the resulting embedding.
+### Decision 003: Cleaning the source content
 
-#### Initial implementation: Word-based chunking
+**Problem**
 
-I initially used Python's regular expressions to split documents based on whitespace-separated words.
+Kubernetes documentation contains Hugo shortcodes, HTML comments, Markdown links, and other formatting that is not always useful when generating embeddings.
 
-The `re.finditer(r"\S+", content)` expression identifies each sequence of non-whitespace characters and records its position in the original text.
+**Initial approach**
 
-These positions are then used to extract chunks from the original document.
+Use the Markdown source directly.
 
-The initial implementation also introduced overlapping chunks.
+**New approach**
 
-#### Problem encountered
+I added a cleanup function that:
+- Preserves glossary tooltip text.
+- Removes HTML comments.
+- Removes Hugo shortcode wrapper tags.
+- Preserves Markdown link text while removing the URL.
 
-Words and tokens are not the same.
+**Why**
 
-The embedding model uses WordPiece tokenization, meaning a single word can be split into multiple tokens.
+The embedding model should receive meaningful documentation text rather than unnecessary markup.
 
-For example:
+**Trade-offs**
 
-```text
-Kubernetes
-    |
-    v
-ku + ##ber + ##net + ##es
-```
+The cleanup rules are designed around the current documentation source. Other Markdown repositories may require different cleanup rules.
 
-A chunk containing 150 whitespace-separated words could therefore contain significantly more than 256 model tokens.
+**Validation**
 
-This meant that word-based chunking could not reliably respect the embedding model's input limit.
+Inspect the cleaned text to confirm that useful content is preserved and unwanted markup is removed.
 
-#### Current implementation: Token-based chunking
+### Decision 004: Normalized embeddings
 
-I changed the implementation to use the tokenizer belonging to `all-MiniLM-L6-v2`.
+**Problem**
 
-The tokenizer splits the original document into windows based on its actual token count.
+The retrieval process needs a consistent way to compare document embeddings with a query embedding.
 
-Current configuration:
+**Initial approach**
 
-| Setting | Value |
-|---|---:|
-| Embedding model | all-MiniLM-L6-v2 |
-| Maximum sequence length | 256 tokens |
-| Chunk size | 251 tokens |
-| Overlap | 50 tokens |
+Generate embeddings without explicitly normalizing them.
 
-The tokenizer uses `return_overflowing_tokens=True` to ensure that the remaining document is returned in additional windows instead of being discarded.
+**New approach**
 
-The token IDs are decoded back into text before generating embeddings.
+I use `normalize_embeddings=True` when generating both document and query embeddings.
 
-The decoded text is tokenized again to verify that each chunk fits within the model's maximum sequence length.
+**Why**
 
-**Learning notes:**
-- Difference between words and tokens.
-- Tokenizers and WordPiece tokenization.
-- Model input-length restrictions.
-- Token-based chunking.
-- Overflow handling.
-- Overlapping chunks and context preservation.
+When vectors are normalized, their dot product is equivalent to cosine similarity. This allows similarity scores to be calculated using a simple matrix multiplication.
 
-**Status:** Implemented. Exploring offset mapping to improve how original text is extracted.
+**Trade-offs**
 
-### Stage 4 — Embedding generation
+Normalization removes vector magnitude. This is appropriate for the cosine-similarity approach used in this project.
 
-**Objective:** Convert each text chunk into a numerical representation that can be compared with other text.
+**Validation**
 
-An embedding represents the meaning of a piece of text as a vector of numbers.
+Confirm that document and query embeddings are both generated with normalization enabled.
 
-I'm using the local Sentence Transformers model:
+### Decision 005: Persisting vectors in JSONL
 
-`sentence-transformers/all-MiniLM-L6-v2`
+**Problem**
 
-The model produces a 384-dimensional vector for each chunk.
+Keeping generated embeddings only in memory means they need to be generated again whenever the ingestion script runs.
 
-```python
-embeddings = model.encode(
-    chunks_text,
-    normalize_embeddings=True
-)
-```
+**Initial approach**
 
-The `normalize_embeddings=True` parameter ensures that each vector has a length of 1.
+Store generated data in Python objects during execution.
 
-This allows me to use the dot product to calculate cosine similarity during retrieval.
+**New approach**
 
-The embedding model runs locally, so no external embedding API call is required.
-
-**Learning notes:**
-- What embeddings represent.
-- Sentence Transformers.
-- NumPy arrays.
-- Vector dimensions.
-- Vector normalization.
-- Why the same embedding model must be used for document chunks and user queries.
-
-**Status:** Implemented.
-
-### Stage 5 — Vector storage
-
-**Objective:** Persist the document chunks and their embeddings so that they can be searched later.
-
-Each chunk is stored as an individual JSONL record.
-
-The record contains:
-
-| Field | Purpose |
-|---|---|
-| `doc_id` | Identifies the original document |
-| `chunk_id` | Uniquely identifies the individual chunk |
-| `source` | Original document path |
-| `text` | Actual text of the chunk |
-| `embedding` | Numerical vector generated by the embedding model |
-
-Example:
+Save each chunk as a separate JSONL record containing:
 
 ```json
 {
-  "doc_id": "concepts/workloads/pods",
-  "chunk_id": "concepts/workloads/pods#chunk-1",
-  "source": "docs/concepts/workloads/pods.md",
-  "text": "A Pod is the smallest deployable unit...",
-  "embedding": [0.12, 0.43, 0.87]
+  "doc_id": "concepts/workloads",
+  "chunk_id": "concepts/workloads#chunk-1",
+  "source": "docs/concepts/workloads.md",
+  "text": "The original chunk text...",
+  "embedding": [0.012, -0.034, 0.056]
 }
 ```
 
-The actual embedding contains 384 numbers.
+**Why**
 
-The output is stored in:
+JSONL provides a simple persistent format. Each record keeps the chunk text and its embedding together with the source metadata needed for retrieval and citations.
 
-`vectors/vectors.jsonl`
+**Trade-offs**
 
-JSONL was chosen initially because it is simple to inspect and doesn't require a separate database.
+The format is easy to inspect and work with locally, but it does not provide an index for efficient large-scale vector search. The current ingestion script also rebuilds the vector file rather than updating individual records.
 
-**Learning notes:**
-- JSON and JSONL.
-- Document metadata.
-- Unique document and chunk identifiers.
-- Persisting embeddings.
-- Retrieving original text using chunk identifiers.
+**Validation**
 
-**Status:** Implemented.
+Run ingestion, inspect the generated JSONL records, and load them again from the query script.
 
-### Stage 6 — Similarity search and retrieval
+### Decision 006: Vectorized similarity search
 
-**Objective:** Given a question, find the document chunks that are most similar in meaning.
+**Problem**
 
-When a user submits a question, the same embedding model converts the question into a numerical vector.
+The query needs to be compared against all stored document embeddings to find the most relevant chunks.
 
-The query vector is compared against all stored document vectors.
+**Initial approach**
+
+Calculate similarity scores by iterating over the stored vectors.
+
+**New approach**
+
+I load the embeddings into a NumPy array and calculate the scores using matrix multiplication:
 
 ```python
 scores = vectors @ query_vector
 ```
 
-Because the vectors are normalized, the dot product is equivalent to cosine similarity.
+Then I sort the scores in descending order and select the top three matches.
 
-The resulting scores are sorted to identify the three most similar chunks.
+**Why**
 
-```python
-k_matches = np.argsort(scores)[::-1][:3]
-```
+NumPy performs the calculation as a vectorized operation rather than requiring a Python loop for every embedding.
 
-The matching indexes are used to retrieve the original text and document metadata from the vector store.
+**Trade-offs**
 
-**Learning notes:**
-- Vector similarity.
-- Dot products and matrix multiplication.
-- Cosine similarity.
-- NumPy array dimensions.
-- `argsort()` and ranking.
-- Top-K retrieval.
+This approach is simple and effective for the current dataset, but all embeddings must fit in memory. It also performs a brute-force comparison against every stored vector.
 
-**Status:** Implemented.
+**Validation**
 
-### Stage 7 — Answer generation using an LLM
-
-**Objective:** Use the retrieved document chunks to generate an answer to the original question.
-
-The application sends two things to the OpenAI API:
-
-1. The user's original question.
-2. The three document chunks retrieved during the search.
-
-The language model receives instructions to:
-
-- Answer using only the supplied documents.
-- Cite the relevant chunk IDs and source documents.
-- Avoid unsupported information.
-- Say that it doesn't know when the supplied documents don't contain enough information.
-
-The application uses OpenAI's Responses API.
-
-**Learning notes:**
-- OpenAI API integration.
-- Prompt construction.
-- Context injection.
-- Grounded answer generation.
-- Source citations.
-- The relationship between retrieval quality and answer quality.
-
-**Status:** Implemented.
+Inspect the highest-scoring chunks for a set of test questions and confirm that the retrieved text is relevant to the question.
 
 ---
 
-## 5. Engineering decisions and implementation history
+## Setup and execution
 
-This section documents the problems encountered, the approaches tried, and the reasoning behind implementation changes.
+### 1. Create a virtual environment
 
-Each significant decision follows the same structure:
-
-- **Problem:** What wasn't working or what limitation did I encounter?
-- **Initial approach:** How did I solve it originally?
-- **New approach:** What did I change?
-- **Why:** Why is the new approach better?
-- **Trade-offs:** What did I gain or lose?
-- **Validation:** How did I test whether the change worked?
-
-Detailed explanations and code comparisons are maintained in `docs/decisions/`.
-
-### Decision 001 — Moving from word-based to token-based chunking
-
-**Problem**
-
-The original chunking logic split documents using whitespace-separated words.
-
-However, the embedding model uses WordPiece tokenization. A single word can become several tokens.
-
-This caused some chunks to exceed the model's 256-token input limit, even when their word count appeared relatively small.
-
-**Initial approach**
-
-Used Python's `re.finditer(r"\S+", content)` to identify word positions and extract chunks based on a fixed word count.
-
-The implementation also supported overlapping chunks.
-
-**New approach**
-
-Changed the implementation to use the embedding model's own tokenizer.
-
-The tokenizer now splits the entire document into windows using:
-
-- `max_length`
-- `stride`
-- `return_overflowing_tokens=True`
-
-Each window is then decoded back into text before embedding.
-
-**Why**
-
-Chunking based on the model's own tokens ensures that the chunks are aligned with the actual input units understood by the embedding model.
-
-The overflow setting also ensures that the remaining document is returned in additional chunks instead of being discarded.
-
-**Trade-offs**
-
-- The chunking implementation is more dependent on the selected embedding model's tokenizer.
-- The token IDs must be decoded back into text before they can be passed to `model.encode()`.
-- Decoding can change capitalization, whitespace, and token boundaries.
-- The decoded text must therefore be tokenized again to verify that it still fits the model's input limit.
-
-**Validation**
-
-Tested the implementation using Kubernetes documentation containing technical terms and identifiers.
-
-Compared whitespace-based word counts against actual tokenizer counts and confirmed that word-based chunk sizes could exceed the 256-token limit.
-
-Added a validation step that checks the token count of every decoded chunk before embedding.
-
-### Decision 002 — Introducing overlapping chunks
-
-**Problem**
-
-When a document is divided into separate chunks, information that belongs together can end up on opposite sides of a chunk boundary.
-
-A chunk may therefore lose context that was present in the preceding section.
-
-**Initial approach**
-
-Created independent chunks without repeating any content between consecutive chunks.
-
-**New approach**
-
-Introduced a 50-token overlap between consecutive chunks.
-
-For example, with a five-token chunk size and one-token overlap:
-
-```text
-Chunk 1: 0 1 2 3 4
-Chunk 2:         4 5 6 7 8
-Chunk 3:                 8 9 10 11
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-The tokenizer's `stride` parameter controls this overlap.
+### 2. Install dependencies
 
-**Why**
+```bash
+pip install sentence-transformers numpy openai
+```
 
-Repeating a small portion of the previous chunk helps preserve context when information crosses a chunk boundary.
+### 3. Add the source documents
 
-**Trade-offs**
+Place the Kubernetes Markdown files under the `docs/` directory.
 
-- Some text is stored and embedded more than once.
-- The number of chunks increases.
-- Retrieval may return overlapping chunks containing similar information.
-- Excessive overlap can increase storage and retrieval costs without necessarily improving answer quality.
+### 4. Generate document embeddings
 
-**Validation**
+```bash
+python RAG_save_document_vectors.py
+```
 
-Inspected consecutive chunks to confirm that the intended overlap was present.
+This reads the Markdown files, cleans the content, creates chunks and embeddings, and writes the records to `vectors/vectors.jsonl`.
 
-Further retrieval-quality testing is needed to determine whether 50 tokens is the most appropriate overlap for this documentation collection.
+### 5. Configure the OpenAI API key
 
-### Decision 003 — Using tokenizer offset mapping for chunk extraction
+The query script reads the key from the `API_KEY` environment variable.
 
-**Status:** Planned improvement.
+```bash
+export API_KEY="your-api-key"
+```
 
-**Problem**
+### 6. Ask a question
 
-The current implementation tokenizes the original document, decodes each token window into text, and then tokenizes the decoded text again.
+```bash
+python RAG_query.py
+```
 
-This introduces two problems:
+Enter a question when prompted. The script generates a query embedding, retrieves the top matching chunks, and sends the retrieved context to the LLM.
 
-1. The decoded text can have different capitalization and whitespace from the original document because the tokenizer is uncased.
-2. Decoding and re-tokenizing can produce different token boundaries, potentially causing a decoded chunk to exceed the model's input limit.
+## Next improvements
 
-A five-token safety margin was introduced to reduce the likelihood of exceeding the limit, but this is an approximation rather than a guaranteed solution.
+I am keeping future improvements separate from implemented engineering decisions. As I implement and validate each one, I will add it to the decision history above.
 
-**Initial approach**
-
-1. Tokenize the entire document.
-2. Split it into token windows.
-3. Decode each window into text.
-4. Tokenize the decoded text again.
-5. Validate the token count.
-6. Generate embeddings.
-
-**New approach**
-
-Use `return_offsets_mapping=True` when tokenizing.
-
-The tokenizer provides the starting and ending character positions of each token in the original document.
-
-Instead of decoding token IDs, use these positions to extract the corresponding text directly from the original string.
-
-**Why**
-
-This avoids the decode-and-re-tokenize round trip and preserves the original document's capitalization and whitespace.
-
-It also allows chunk extraction to be based on the actual character positions associated with the selected tokens.
-
-**Trade-offs**
-
-- Token boundaries can occur in the middle of words.
-- Chunk boundaries may need to be adjusted to preserve complete words.
-- The extracted original text should still be re-tokenized and validated before embedding because its token boundaries can change when processed as an independent string.
-
-**Validation**
-
-To be completed after implementation.
-
-The new approach will be compared against the existing decoding approach using:
-- Original versus extracted text.
-- Token counts after extraction.
-- Preservation of capitalization and whitespace.
-- Successful embedding without truncation.
-- Retrieval quality.
-
-### Decision 004 — Cleaning Kubernetes documentation before embedding
-
-**Problem**
-
-The original Markdown files contain website-specific formatting, including Hugo shortcodes, HTML comments, and URLs.
-
-These elements are not always useful for semantic retrieval and can introduce unnecessary tokens.
-
-**Initial approach**
-
-Read the Markdown files and pass their contents directly into the chunking and embedding process.
-
-**New approach**
-
-Introduced a `content_cleanup()` function using regular expressions.
-
-The function:
-- Preserves glossary terms from `glossary_tooltip`.
-- Removes HTML comments.
-- Removes Hugo shortcode wrapper tags.
-- Preserves Markdown link text while removing URLs.
-
-**Why**
-
-The objective is to retain the meaningful documentation while removing website-rendering instructions and unnecessary formatting.
-
-**Trade-offs**
-
-- Regular expressions are designed around the specific patterns currently encountered.
-- More complex
