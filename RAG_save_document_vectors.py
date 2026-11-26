@@ -4,9 +4,12 @@ from sentence_transformers import SentenceTransformer
 import json
 from numpy.typing import NDArray
 model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-MAX_TOKENS_SIZE = model.max_seq_length
-
 OVERLAP_SIZE = 50
+MAX_TOKENS_SIZE = model.max_seq_length
+SPECIAL_TOKEN_SIZE = model.tokenizer.num_special_tokens_to_add(pair=False)
+MAX_CONTENT_TOKENS = MAX_TOKENS_SIZE - SPECIAL_TOKEN_SIZE 
+
+
 KNOWLEDGE_VECTOR=[]
 DOCUMENT_FILES = "./docs/"
 VECTOR_FILE = "./vectors/vectors.jsonl"
@@ -14,40 +17,78 @@ VECTOR_FILE = "./vectors/vectors.jsonl"
 def encode_text(text:str, doc_id:str) -> tuple[NDArray,list[str]]:
     """
     The model all-MiniLM-L6-v2 has a limitation of MAX_TOKENS_SIZE of 256 on the input text it can encode at a time.
-    To get over this limitation, the text is first tokenized into MAX_TOKENS_SIZE size chunks
-    Then the start and end positions are calculated for each token chunk using the offset_mapping and used to create text chunks
-    The text chunks are toneknized again to ensure the MAX_TOKENS_SIZE  is not exceeded
+    To get over this limitation, the text is first tokenized as whole
+    Then tokens that belong to the same word and grouped together and chunks with complete word tokens are created. Each chunk is capped at the (MAX_TOKENS_SIZE - SPECIAL_TOKEN_SIZE).
     Finally the embeddings are created from the text chunks
     """
 
     if not model.tokenizer.is_fast:
         raise ValueError("Offset mapping requires a fast tokenizer.")
     
+    
     encoded = model.tokenizer(
-        text ,
-        truncation = True,
-        add_special_tokens=True,
-        max_length = MAX_TOKENS_SIZE,
-        stride = OVERLAP_SIZE,
-        return_overflowing_tokens=True,
+        text,
+        add_special_tokens= False,
+        truncation=False,
         return_offsets_mapping= True
     )
 
+    word_ids = encoded.word_ids()
+    offsets = encoded["offset_mapping"]
 
-    chunks_text = []
-    for offsets in encoded["offset_mapping"]:
-        valid_offsets =[
-            (start,end) for start,end in offsets
-            if start < end 
-        ]
-        if not valid_offsets:
-            continue
-        start_position=valid_offsets[0][0]
-        end_position = valid_offsets[-1][1]
-        chunk = text[start_position:end_position]
-        chunks_text.append(chunk)
+    #group tokens that belong to the same word
+    start_word_group = 0
+    word_groups =[]
+    while start_word_group < len(word_ids):
+        end_word_group = start_word_group + 1
+        current_word = word_ids[start_word_group]
+        while(end_word_group < len(word_ids) and word_ids[end_word_group] == current_word):
+            end_word_group += 1
+        word_group = {
+            "token_count":end_word_group - start_word_group,
+            "char_start":offsets[start_word_group][0],
+            "char_end":offsets[end_word_group - 1][1]
+        }
 
+        word_groups.append(word_group)
+        start_word_group = end_word_group
 
+    # now we have token start and end and counts for the same  word in the same word group.
+    # next we chunk these tokens ,keeping all tokens for a word in the same chunk
+    start_chunk_group = 0
+    chunk_text_groups =[]
+    chunk_length_groups =[]
+    while start_chunk_group < len(word_groups):
+        end_chunk_group = start_chunk_group
+        current_chunk_count = 0
+        while( end_chunk_group < len(word_groups) and current_chunk_count + word_groups[end_chunk_group]["token_count"] <= MAX_CONTENT_TOKENS):
+            current_chunk_count += word_groups[end_chunk_group]["token_count"]
+            end_chunk_group += 1
+
+        if end_chunk_group == start_chunk_group:
+            raise ValueError(f"chunk group{start_chunk_group} has tokens over the {MAX_CONTENT_TOKENS}")
+        
+        chunk_start_position = word_groups[start_chunk_group]["char_start"]
+        chunk_end_position = word_groups[end_chunk_group - 1]["char_end"]
+        chunk = text[chunk_start_position:chunk_end_position]
+        chunk_text_groups.append(chunk)
+        chunk_length_groups.append(current_chunk_count)
+        if end_chunk_group == len(word_groups):
+            break
+
+        # calculate the next chunk start based on overlap words- find out what word to overlap starting from the last word of the current chunk and working backwords
+        next_chunk_group = end_chunk_group
+        overlap_tokens = 0
+        while next_chunk_group -1 > start_chunk_group:
+            previous_word_tokens = word_groups[next_chunk_group-1]["token_count"]
+            if (overlap_tokens + previous_word_tokens > OVERLAP_SIZE):
+                break
+            next_chunk_group -=1
+            overlap_tokens += previous_word_tokens
+
+        start_chunk_group = next_chunk_group
+
+    """
     chunks_text_token_len = [
        len( 
             model.tokenizer(
@@ -55,37 +96,42 @@ def encode_text(text:str, doc_id:str) -> tuple[NDArray,list[str]]:
             add_special_tokens=True,
             truncation = False
             )['input_ids']
-        ) for chunk in chunks_text
+        ) for chunk in chunk_text_groups
     ]
+    """
 
-    chunks_text_token = [
-       
+    chunks_retokenized = [ 
             model.tokenizer(
             chunk ,
             add_special_tokens=True,
             truncation = False
             )['input_ids']
-         for chunk in chunks_text
+         for chunk in chunk_text_groups
+    ]
+
+    chunks_retokenized_len = [
+        len(ids) for ids in chunks_retokenized
     ]
 
     oversized = [
-        (index,count) for (index,count) in enumerate(chunks_text_token_len)
-        if count > MAX_TOKENS_SIZE
+        (index,(retoken_count,token_count)) for index,(retoken_count,token_count) in enumerate(zip(chunks_retokenized_len,chunk_length_groups))
+        if retoken_count != token_count + SPECIAL_TOKEN_SIZE
     ]
     if oversized:
-        for (id,_) in oversized:
-                print(f"chunk text oversize:{chunks_text[id]}")
-                print(f"chunk tokens:{chunks_text_token[id]}")
-                print(f"original tokens:{encoded["input_ids"][id]}")
+        for (id,(retoken_count,token_count)) in oversized:
+                print(f"chunk text oversize:{chunk_text_groups[id]}")
+                print(f"token_count:{token_count}")
+                print(f"retoken_count:{retoken_count}")
                 print(f"end test")
-        raise ValueError(f"document id:{doc_id} has the following chunks over {MAX_TOKENS_SIZE} : {oversized} ")
+                break
+        raise ValueError(f"document id:{doc_id} has the following chunks over {MAX_CONTENT_TOKENS} : {oversized} ")
         
     embeddings = model.encode(
-        chunks_text,
+        chunk_text_groups,
         normalize_embeddings=True
     )
 
-    return embeddings,chunks_text
+    return embeddings,chunk_text_groups
 
 def content_cleanup(text: str)-> str:
     """
@@ -132,7 +178,7 @@ def chunk_and_encode_file(doc_id: str,doc_path: str,content: str, vector_file: P
 
 def parse_save_documents(source_docs:Path,vector_file: Path, doc_ext:str='md') -> None:
     """
-    Reads source documents to parse them
+    Parse source documents and save as vectors
     """
     if not source_docs.is_dir():
         raise FileNotFoundError(f"Cannot find {source_docs} folder. Check the folder path")
